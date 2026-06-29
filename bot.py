@@ -2,13 +2,14 @@ import logging
 import sqlite3
 import os
 import threading
+import time
 from flask import Flask
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, InlineKeyboardButton
+from aiogram.types import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import asyncio
 
@@ -17,7 +18,8 @@ BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_TOKEN в переменных окружения!")
 
-ADMIN_ID = 6499184401  # ваш ID (можно тоже вынести в переменную)
+ADMIN_ID = 6499184401
+CHANNEL_USERNAME = "@anonrolka"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,13 +38,18 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             roles TEXT,
             types TEXT,
+            genres TEXT,
             age_group TEXT,
             preferred_age_groups TEXT,
             gender TEXT,
             preferred_gender TEXT,
             is_searching INTEGER DEFAULT 0,
             is_chatting INTEGER DEFAULT 0,
-            partner_id INTEGER DEFAULT NULL
+            partner_id INTEGER DEFAULT NULL,
+            warn_count INTEGER DEFAULT 0,
+            is_muted INTEGER DEFAULT 0,
+            mute_until INTEGER DEFAULT 0,
+            is_banned INTEGER DEFAULT 0
         )
     """)
     conn.commit()
@@ -53,35 +60,46 @@ init_db()
 def get_user(user_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT roles, types, age_group, preferred_age_groups, gender, preferred_gender, is_searching, is_chatting, partner_id FROM users WHERE user_id=?", (user_id,))
+    cur.execute("""
+        SELECT roles, types, genres, age_group, preferred_age_groups, gender, preferred_gender,
+               is_searching, is_chatting, partner_id, warn_count, is_muted, mute_until, is_banned
+        FROM users WHERE user_id=?
+    """, (user_id,))
     row = cur.fetchone()
     conn.close()
     if row:
         return {
             "roles": row[0].split(",") if row[0] else [],
             "types": row[1].split(",") if row[1] else [],
-            "age_group": row[2],
-            "preferred_age_groups": row[3].split(",") if row[3] else [],
-            "gender": row[4],
-            "preferred_gender": row[5].split(",") if row[5] else [],
-            "is_searching": bool(row[6]),
-            "is_chatting": bool(row[7]),
-            "partner_id": row[8]
+            "genres": row[2].split(",") if row[2] else [],
+            "age_group": row[3],
+            "preferred_age_groups": row[4].split(",") if row[4] else [],
+            "gender": row[5],
+            "preferred_gender": row[6].split(",") if row[6] else [],
+            "is_searching": bool(row[7]),
+            "is_chatting": bool(row[8]),
+            "partner_id": row[9],
+            "warn_count": row[10],
+            "is_muted": bool(row[11]),
+            "mute_until": row[12],
+            "is_banned": bool(row[13])
         }
     return None
 
-def create_or_update_user(user_id: int, roles: list, types: list, age_group: str, preferred_age_groups: list,
-                          gender: str, preferred_gender: list):
+def create_or_update_user(user_id: int, roles: list, types: list, genres: list, age_group: str,
+                          preferred_age_groups: list, gender: str, preferred_gender: list):
     roles_str = ",".join(roles)
     types_str = ",".join(types)
+    genres_str = ",".join(genres)
     pref_age_str = ",".join(preferred_age_groups)
     pref_gender_str = ",".join(preferred_gender)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR REPLACE INTO users (user_id, roles, types, age_group, preferred_age_groups, gender, preferred_gender)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, roles_str, types_str, age_group, pref_age_str, gender, pref_gender_str))
+        INSERT OR REPLACE INTO users
+        (user_id, roles, types, genres, age_group, preferred_age_groups, gender, preferred_gender)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, roles_str, types_str, genres_str, age_group, pref_age_str, gender, pref_gender_str))
     conn.commit()
     conn.close()
 
@@ -94,6 +112,44 @@ def update_user(user_id: int, **kwargs):
     conn.commit()
     conn.close()
 
+def is_user_banned(user_id: int) -> bool:
+    user = get_user(user_id)
+    return user and user["is_banned"]
+
+def is_user_muted(user_id: int) -> bool:
+    user = get_user(user_id)
+    if not user:
+        return False
+    if user["is_muted"] and user["mute_until"] and time.time() < user["mute_until"]:
+        return True
+    if user["is_muted"] and user["mute_until"] and time.time() >= user["mute_until"]:
+        update_user(user_id, is_muted=0, mute_until=0)
+        return False
+    return False
+
+# ========== ПРОВЕРКА ПОДПИСКИ ==========
+async def is_subscribed(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception as e:
+        logging.warning(f"Ошибка проверки подписки для {user_id}: {e}")
+        return True
+
+async def require_subscription(message: types.Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📢 Подписаться на канал", url="https://t.me/anonrolka")],
+            [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_subscription")]
+        ]
+    )
+    await message.answer(
+        "🔒 Для использования бота необходимо подписаться на наш канал: t.me/anonrolka\n"
+        "После подписки нажмите «Проверить подписку».",
+        reply_markup=keyboard,
+        disable_web_page_preview=True
+    )
+
 # ========== ОЧЕРЕДЬ ПОИСКА ==========
 search_queue = []
 
@@ -101,6 +157,7 @@ search_queue = []
 class ProfileForm(StatesGroup):
     role = State()
     type = State()
+    genres = State()
     age = State()
     preferred_age = State()
     gender = State()
@@ -130,7 +187,7 @@ def get_age_kb(selected=None):
         builder.add(InlineKeyboardButton(text=text, callback_data=f"age_{age}"))
     builder.adjust(1)
     builder.row(
-        InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_type"),
+        InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_genres"),
         InlineKeyboardButton(text="Далее ▶️", callback_data="next_step")
     )
     return builder.as_markup()
@@ -198,6 +255,9 @@ def are_roles_compatible(roles1, roles2):
 def are_types_compatible(types1, types2):
     return bool(set(types1) & set(types2))
 
+def are_genres_compatible(genres1, genres2):
+    return bool(set(genres1) & set(genres2))
+
 def are_ages_compatible(age1, pref_ages1, age2, pref_ages2):
     return (age2 in pref_ages1) and (age1 in pref_ages2)
 
@@ -208,6 +268,12 @@ async def try_match(user_id: int):
     user = get_user(user_id)
     if not user:
         return False
+    if is_user_banned(user_id):
+        await bot.send_message(user_id, "⛔ Вы забанены и не можете искать собеседников.")
+        return False
+    if is_user_muted(user_id):
+        await bot.send_message(user_id, "🔇 Вы в муте и не можете искать собеседников.")
+        return False
     for candidate_id in search_queue[:]:
         if candidate_id == user_id:
             continue
@@ -215,8 +281,15 @@ async def try_match(user_id: int):
         if not cand:
             search_queue.remove(candidate_id)
             continue
+        if is_user_banned(candidate_id):
+            search_queue.remove(candidate_id)
+            continue
+        if is_user_muted(candidate_id):
+            search_queue.remove(candidate_id)
+            continue
         if (are_roles_compatible(user["roles"], cand["roles"]) and
             are_types_compatible(user["types"], cand["types"]) and
+            are_genres_compatible(user["genres"], cand["genres"]) and
             are_ages_compatible(user["age_group"], user["preferred_age_groups"],
                                 cand["age_group"], cand["preferred_age_groups"]) and
             are_genders_compatible(user["gender"], user["preferred_gender"],
@@ -238,16 +311,26 @@ async def try_match(user_id: int):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    if not await is_subscribed(user_id):
+        await require_subscription(message)
+        return
+    if is_user_banned(user_id):
+        await message.answer("⛔ Вы забанены и не можете пользоваться ботом.")
+        return
     user = get_user(user_id)
     if not user:
         await state.set_state(ProfileForm.role)
-        await state.update_data(step=1, roles=[], types=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
+        await state.update_data(step=1, roles=[], types=[], genres=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
         await show_role_step(message, state)
     else:
         await show_main_menu(message)
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
+    user_id = message.from_user.id
+    if not await is_subscribed(user_id):
+        await require_subscription(message)
+        return
     help_text = """
 📌 *Доступные команды:*
 /start — главное меню
@@ -264,21 +347,30 @@ async def cmd_help(message: types.Message):
 @dp.message(Command("profile"))
 async def cmd_profile(message: types.Message):
     user_id = message.from_user.id
+    if not await is_subscribed(user_id):
+        await require_subscription(message)
+        return
+    if is_user_banned(user_id):
+        await message.answer("⛔ Вы забанены.")
+        return
     user = get_user(user_id)
     if not user:
         await message.answer("❌ Вы ещё не заполнили анкету. Используйте команду /edit, чтобы создать анкету.")
         return
     roles_map = {"offer": "Предлагаю", "seek": "Ищу"}
     type_map = {"original": "Ориджинал", "fandom": "Фандом", "other": "Другое"}
+    genre_map = {"yaoi": "Яой", "get": "Гет", "yuri": "Юри"}
     gender_map = {"male": "Мужской", "female": "Женский"}
     roles_str = ", ".join([roles_map.get(r, r) for r in user["roles"]])
     types_str = ", ".join([type_map.get(t, t) for t in user["types"]])
+    genres_str = ", ".join([genre_map.get(g, g) for g in user["genres"]])
     pref_age_str = ", ".join(user["preferred_age_groups"])
     pref_gender_str = ", ".join([gender_map.get(g, g) for g in user["preferred_gender"]])
     text = f"""
 👤 *Ваша анкета:*
 Роли: {roles_str}
 Типы: {types_str}
+Жанры: {genres_str}
 Ваш возраст: {user["age_group"]}
 Ищете возраст: {pref_age_str}
 Ваш пол: {gender_map.get(user["gender"], user["gender"])}
@@ -361,9 +453,9 @@ async def type_next(callback: types.CallbackQuery, state: FSMContext):
     if not data.get("types"):
         await callback.answer("Выберите хотя бы один тип!", show_alert=True)
         return
-    await state.set_state(ProfileForm.age)
+    await state.set_state(ProfileForm.genres)
     await state.update_data(step=3)
-    await show_age_step(callback.message, state, edit=True)
+    await show_genres_step(callback.message, state, edit=True)
     await callback.answer()
 
 @dp.callback_query(StateFilter(ProfileForm.type), lambda c: c.data == "back_to_role")
@@ -373,7 +465,54 @@ async def back_to_role(callback: types.CallbackQuery, state: FSMContext):
     await show_role_step(callback.message, state, edit=True)
     await callback.answer()
 
-# === ШАГ 3: СВОЙ ВОЗРАСТ ===
+# === ШАГ 3: ЖАНРЫ ===
+async def show_genres_step(message: types.Message, state: FSMContext, edit=False):
+    data = await state.get_data()
+    genres = data.get("genres", [])
+    options = {"yaoi": "Яой", "get": "Гет", "yuri": "Юри"}
+    kb = get_multi_choice_kb(options, genres, "genre", back_callback="back_to_type", next_callback="next_step")
+    text = "Выберите жанры (можно несколько):"
+    if edit:
+        await message.edit_text(text, reply_markup=kb)
+    else:
+        await message.answer(text, reply_markup=kb)
+
+@dp.callback_query(StateFilter(ProfileForm.genres), lambda c: c.data.startswith("genre_"))
+async def process_genre_toggle(callback: types.CallbackQuery, state: FSMContext):
+    value = callback.data.split("_")[1]
+    data = await state.get_data()
+    genres = data.get("genres", [])
+    old_genres = genres.copy()
+    if value in genres:
+        genres.remove(value)
+    else:
+        genres.append(value)
+    if genres == old_genres:
+        await callback.answer()
+        return
+    await state.update_data(genres=genres)
+    await show_genres_step(callback.message, state, edit=True)
+    await callback.answer()
+
+@dp.callback_query(StateFilter(ProfileForm.genres), lambda c: c.data == "next_step")
+async def genres_next(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("genres"):
+        await callback.answer("Выберите хотя бы один жанр!", show_alert=True)
+        return
+    await state.set_state(ProfileForm.age)
+    await state.update_data(step=4)
+    await show_age_step(callback.message, state, edit=True)
+    await callback.answer()
+
+@dp.callback_query(StateFilter(ProfileForm.genres), lambda c: c.data == "back_to_type")
+async def back_to_type_from_genres(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileForm.type)
+    await state.update_data(step=2)
+    await show_type_step(callback.message, state, edit=True)
+    await callback.answer()
+
+# === ШАГ 4: СВОЙ ВОЗРАСТ ===
 async def show_age_step(message: types.Message, state: FSMContext, edit=False):
     data = await state.get_data()
     age = data.get("age")
@@ -403,18 +542,18 @@ async def age_next(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Выберите свой возраст!", show_alert=True)
         return
     await state.set_state(ProfileForm.preferred_age)
-    await state.update_data(step=4)
+    await state.update_data(step=5)
     await show_preferred_age_step(callback.message, state, edit=True)
     await callback.answer()
 
-@dp.callback_query(StateFilter(ProfileForm.age), lambda c: c.data == "back_to_type")
-async def back_to_type_from_age(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(ProfileForm.type)
-    await state.update_data(step=2)
-    await show_type_step(callback.message, state, edit=True)
+@dp.callback_query(StateFilter(ProfileForm.age), lambda c: c.data == "back_to_genres")
+async def back_to_genres_from_age(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileForm.genres)
+    await state.update_data(step=3)
+    await show_genres_step(callback.message, state, edit=True)
     await callback.answer()
 
-# === ШАГ 4: ВОЗРАСТ СОБЕСЕДНИКА ===
+# === ШАГ 5: ВОЗРАСТ СОБЕСЕДНИКА ===
 async def show_preferred_age_step(message: types.Message, state: FSMContext, edit=False):
     data = await state.get_data()
     pref_age = data.get("preferred_age", [])
@@ -449,18 +588,18 @@ async def pref_age_next(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Выберите хотя бы одну группу!", show_alert=True)
         return
     await state.set_state(ProfileForm.gender)
-    await state.update_data(step=5)
+    await state.update_data(step=6)
     await show_gender_step(callback.message, state, edit=True)
     await callback.answer()
 
 @dp.callback_query(StateFilter(ProfileForm.preferred_age), lambda c: c.data == "back_to_age")
 async def back_to_age_from_pref(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ProfileForm.age)
-    await state.update_data(step=3)
+    await state.update_data(step=4)
     await show_age_step(callback.message, state, edit=True)
     await callback.answer()
 
-# === ШАГ 5: СВОЙ ПОЛ ===
+# === ШАГ 6: СВОЙ ПОЛ ===
 async def show_gender_step(message: types.Message, state: FSMContext, edit=False):
     data = await state.get_data()
     gender = data.get("gender")
@@ -490,18 +629,18 @@ async def gender_next(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Выберите свой пол!", show_alert=True)
         return
     await state.set_state(ProfileForm.preferred_gender)
-    await state.update_data(step=6)
+    await state.update_data(step=7)
     await show_preferred_gender_step(callback.message, state, edit=True)
     await callback.answer()
 
 @dp.callback_query(StateFilter(ProfileForm.gender), lambda c: c.data == "back_to_pref_age")
 async def back_to_pref_age_from_gender(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ProfileForm.preferred_age)
-    await state.update_data(step=4)
+    await state.update_data(step=5)
     await show_preferred_age_step(callback.message, state, edit=True)
     await callback.answer()
 
-# === ШАГ 6: ПРЕДПОЧИТАЕМЫЙ ПОЛ ===
+# === ШАГ 7: ПРЕДПОЧИТАЕМЫЙ ПОЛ ===
 async def show_preferred_gender_step(message: types.Message, state: FSMContext, edit=False):
     data = await state.get_data()
     pref = data.get("preferred_gender", [])
@@ -532,14 +671,14 @@ async def process_pref_gender_toggle(callback: types.CallbackQuery, state: FSMCo
 @dp.callback_query(StateFilter(ProfileForm.preferred_gender), lambda c: c.data == "back_to_gender")
 async def back_to_gender_from_pref(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ProfileForm.gender)
-    await state.update_data(step=5)
+    await state.update_data(step=6)
     await show_gender_step(callback.message, state, edit=True)
     await callback.answer()
 
 @dp.callback_query(StateFilter(ProfileForm.preferred_gender), lambda c: c.data == "finish_profile")
 async def finish_profile(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if not data.get("roles") or not data.get("types") or not data.get("age") or not data.get("preferred_age") or not data.get("gender") or not data.get("preferred_gender"):
+    if not data.get("roles") or not data.get("types") or not data.get("genres") or not data.get("age") or not data.get("preferred_age") or not data.get("gender") or not data.get("preferred_gender"):
         await callback.answer("Заполните все поля!", show_alert=True)
         return
     user_id = callback.from_user.id
@@ -547,6 +686,7 @@ async def finish_profile(callback: types.CallbackQuery, state: FSMContext):
         user_id,
         data["roles"],
         data["types"],
+        data["genres"],
         data["age"],
         data["preferred_age"],
         data["gender"],
@@ -560,13 +700,23 @@ async def finish_profile(callback: types.CallbackQuery, state: FSMContext):
 # ========== КОМАНДЫ ==========
 @dp.message(Command("edit"))
 async def cmd_edit(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if not await is_subscribed(user_id):
+        await require_subscription(message)
+        return
+    if is_user_banned(user_id):
+        await message.answer("⛔ Вы забанены и не можете изменять анкету.")
+        return
     await state.set_state(ProfileForm.role)
-    await state.update_data(step=1, roles=[], types=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
+    await state.update_data(step=1, roles=[], types=[], genres=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
     await show_role_step(message, state)
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: types.Message):
     user_id = message.from_user.id
+    if not await is_subscribed(user_id):
+        await require_subscription(message)
+        return
     user = get_user(user_id)
     if not user:
         await message.answer("Вы не в чате и не в поиске.")
@@ -592,9 +742,18 @@ async def cmd_stop(message: types.Message):
 @dp.message(Command("next"))
 async def cmd_next(message: types.Message):
     user_id = message.from_user.id
+    if not await is_subscribed(user_id):
+        await require_subscription(message)
+        return
     user = get_user(user_id)
     if not user or not user["is_chatting"]:
         await message.answer("Вы не в чате.")
+        return
+    if is_user_muted(user_id):
+        await message.answer("🔇 Вы в муте. Невозможно искать нового собеседника.")
+        return
+    if is_user_banned(user_id):
+        await message.answer("⛔ Вы забанены.")
         return
     partner_id = user["partner_id"]
     update_user(user_id, is_chatting=0, partner_id=None)
@@ -612,6 +771,9 @@ async def cmd_next(message: types.Message):
 @dp.message(Command("report"))
 async def cmd_report(message: types.Message):
     user_id = message.from_user.id
+    if not await is_subscribed(user_id):
+        await require_subscription(message)
+        return
     user = get_user(user_id)
     if not user or not user["is_chatting"]:
         await message.answer("Вы не в чате, на кого жаловаться?")
@@ -620,10 +782,179 @@ async def cmd_report(message: types.Message):
     await bot.send_message(ADMIN_ID, f"Жалоба от {user_id} на {partner_id}\nТекст: {message.text or 'без текста'}")
     await message.answer("Ваша жалоба отправлена администратору.")
 
+# ========== АДМИН-КОМАНДЫ ==========
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Недостаточно прав.")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users")
+    total_users = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM users WHERE is_searching=1")
+    searching = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM users WHERE is_chatting=1")
+    chatting = cur.fetchone()[0]
+    cur.execute("SELECT user_id, partner_id FROM users WHERE is_chatting=1")
+    active_chats = cur.fetchall()
+    conn.close()
+    text = f"""
+📊 *Админ-панель*
+Всего пользователей: {total_users}
+В поиске: {searching}
+В чатах: {chatting}
+
+*Активные чаты:*
+"""
+    if active_chats:
+        for uid, pid in active_chats:
+            text += f"User {uid} <-> {pid}\n"
+    else:
+        text += "Нет активных чатов."
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(Command("warn"))
+async def cmd_warn(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Недостаточно прав.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /warn <user_id>")
+        return
+    try:
+        target_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+    user = get_user(target_id)
+    if not user:
+        await message.answer("Пользователь не найден.")
+        return
+    new_warn = user["warn_count"] + 1
+    update_user(target_id, warn_count=new_warn)
+    if new_warn >= 3:
+        update_user(target_id, is_banned=1)
+        await bot.send_message(target_id, "⛔ Вы получили 3 предупреждения и были забанены.")
+        await message.answer(f"Пользователь {target_id} получил бан (3 предупреждения).")
+    else:
+        await bot.send_message(target_id, f"⚠️ Вы получили предупреждение ({new_warn}/3).")
+        await message.answer(f"Пользователю {target_id} выдано предупреждение ({new_warn}/3).")
+
+@dp.message(Command("mute"))
+async def cmd_mute(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Недостаточно прав.")
+        return
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("Использование: /mute <user_id> <minutes>")
+        return
+    try:
+        target_id = int(args[1])
+        minutes = int(args[2])
+    except ValueError:
+        await message.answer("ID и минуты должны быть числами.")
+        return
+    user = get_user(target_id)
+    if not user:
+        await message.answer("Пользователь не найден.")
+        return
+    mute_until = int(time.time()) + minutes * 60
+    update_user(target_id, is_muted=1, mute_until=mute_until)
+    await bot.send_message(target_id, f"🔇 Вы были замьючены на {minutes} минут(ы).")
+    await message.answer(f"Пользователь {target_id} замьючен на {minutes} минут(ы).")
+
+@dp.message(Command("unmute"))
+async def cmd_unmute(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Недостаточно прав.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /unmute <user_id>")
+        return
+    try:
+        target_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+    user = get_user(target_id)
+    if not user:
+        await message.answer("Пользователь не найден.")
+        return
+    update_user(target_id, is_muted=0, mute_until=0)
+    await bot.send_message(target_id, "🔊 Ваш мьют снят.")
+    await message.answer(f"Пользователь {target_id} размьючен.")
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Недостаточно прав.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /ban <user_id>")
+        return
+    try:
+        target_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+    user = get_user(target_id)
+    if not user:
+        await message.answer("Пользователь не найден.")
+        return
+    update_user(target_id, is_banned=1)
+    if user["is_chatting"]:
+        partner_id = user["partner_id"]
+        update_user(partner_id, is_chatting=0, partner_id=None)
+        update_user(target_id, is_chatting=0, partner_id=None)
+        await bot.send_message(partner_id, "Собеседник был забанен администратором. Чат завершён.")
+    if user["is_searching"] and target_id in search_queue:
+        search_queue.remove(target_id)
+        update_user(target_id, is_searching=0)
+    await bot.send_message(target_id, "⛔ Вы были забанены администратором.")
+    await message.answer(f"Пользователь {target_id} забанен.")
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Недостаточно прав.")
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /unban <user_id>")
+        return
+    try:
+        target_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+    user = get_user(target_id)
+    if not user:
+        await message.answer("Пользователь не найден.")
+        return
+    update_user(target_id, is_banned=0)
+    await bot.send_message(target_id, "✅ Ваш бан снят.")
+    await message.answer(f"Пользователь {target_id} разбанен.")
+
 # ========== КНОПКИ МЕНЮ ==========
 @dp.callback_query(lambda c: c.data == "start_search")
 async def start_search(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    if not await is_subscribed(user_id):
+        await callback.message.delete()
+        await require_subscription(callback.message)
+        await callback.answer()
+        return
+    if is_user_banned(user_id):
+        await callback.answer("⛔ Вы забанены.", show_alert=True)
+        return
+    if is_user_muted(user_id):
+        await callback.answer("🔇 Вы в муте.", show_alert=True)
+        return
     user = get_user(user_id)
     if not user:
         await callback.answer("Сначала заполните анкету через /edit", show_alert=True)
@@ -653,8 +984,17 @@ async def cancel_search(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "edit_profile")
 async def edit_profile(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    if not await is_subscribed(user_id):
+        await callback.message.delete()
+        await require_subscription(callback.message)
+        await callback.answer()
+        return
+    if is_user_banned(user_id):
+        await callback.answer("⛔ Вы забанены.", show_alert=True)
+        return
     await state.set_state(ProfileForm.role)
-    await state.update_data(step=1, roles=[], types=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
+    await state.update_data(step=1, roles=[], types=[], genres=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
     await show_role_step(callback.message, state, edit=True)
     await callback.answer()
 
@@ -663,15 +1003,40 @@ async def show_profile_callback(callback: types.CallbackQuery):
     await cmd_profile(callback.message)
     await callback.answer()
 
+@dp.callback_query(lambda c: c.data == "check_subscription")
+async def check_subscription_callback(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if await is_subscribed(user_id):
+        await callback.message.edit_text("✅ Подписка подтверждена! Теперь вы можете пользоваться ботом.")
+        await show_main_menu(callback.message)
+    else:
+        await callback.answer("❌ Вы ещё не подписались. Пожалуйста, подпишитесь и нажмите снова.", show_alert=True)
+    await callback.answer()
+
 # ========== ПЕРЕСЫЛКА СООБЩЕНИЙ ==========
 @dp.message(F.text | F.photo | F.video | F.voice | F.document | F.sticker)
 async def forward_message(message: types.Message):
     user_id = message.from_user.id
+    if not await is_subscribed(user_id):
+        await require_subscription(message)
+        return
+    if is_user_muted(user_id):
+        await message.answer("🔇 Вы в муте и не можете отправлять сообщения.")
+        return
+    if is_user_banned(user_id):
+        await message.answer("⛔ Вы забанены.")
+        return
     user = get_user(user_id)
     if not user or not user["is_chatting"]:
         await message.answer("Вы не в активном чате. Используйте /start или «Начать поиск».")
         return
     partner_id = user["partner_id"]
+    if is_user_muted(partner_id) or is_user_banned(partner_id):
+        await message.answer("Ваш собеседник забанен или в муте. Чат будет завершён.")
+        update_user(user_id, is_chatting=0, partner_id=None)
+        update_user(partner_id, is_chatting=0, partner_id=None)
+        await show_main_menu(message)
+        return
     try:
         await message.copy_to(chat_id=partner_id)
     except Exception as e:
