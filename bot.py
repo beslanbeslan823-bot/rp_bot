@@ -13,7 +13,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import asyncio
 
 # ========== НАСТРОЙКИ ==========
-# Токен берём из переменной окружения (безопасно для хостинга)
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_TOKEN в переменных окружения!")
@@ -180,7 +179,6 @@ def get_preferred_gender_kb(selected: list):
 def get_main_menu_kb():
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="🔍 Начать поиск", callback_data="start_search"))
-    builder.add(InlineKeyboardButton(text="✏️ Изменить анкету", callback_data="edit_profile"))
     builder.add(InlineKeyboardButton(text="👤 Моя анкета", callback_data="show_profile"))
     return builder.as_markup()
 
@@ -268,7 +266,7 @@ async def cmd_profile(message: types.Message):
     user_id = message.from_user.id
     user = get_user(user_id)
     if not user:
-        await message.answer("Вы ещё не заполнили анкету. Используйте /edit.")
+        await message.answer("❌ Вы ещё не заполнили анкету. Используйте команду /edit, чтобы создать анкету.")
         return
     roles_map = {"offer": "Предлагаю", "seek": "Ищу"}
     type_map = {"original": "Ориджинал", "fandom": "Фандом", "other": "Другое"}
@@ -710,13 +708,10 @@ def health():
     return "OK"
 
 def run_flask():
-    # Render сам задаёт порт через переменную PORT
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # Запускаем Flask в отдельном потоке, чтобы он не блокировал бота
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    # Запускаем бота
     asyncio.run(main())
