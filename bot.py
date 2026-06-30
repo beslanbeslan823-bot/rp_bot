@@ -127,21 +127,16 @@ def is_user_muted(user_id: int) -> bool:
         return False
     return False
 
-# ========== ПРОВЕРКА ПОДПИСКИ (с обработкой ошибок) ==========
+# ========== ПРОВЕРКА ПОДПИСКИ (без фоллбэка) ==========
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         return member.status in ("member", "administrator", "creator")
     except Exception as e:
-        # Если ошибка "chat not found" – значит бот не добавлен в канал или канал не существует.
-        # В этом случае временно пропускаем проверку, чтобы бот работал,
-        # но в логах оставляем предупреждение.
-        if "chat not found" in str(e):
-            logging.warning(f"Канал {CHANNEL_USERNAME} не найден или бот не добавлен. Проверка подписки пропущена для {user_id}.")
-            return True  # Временно пропускаем проверку
-        else:
-            logging.error(f"Ошибка проверки подписки для {user_id}: {e}")
-            return False
+        logging.error(f"Ошибка проверки подписки для {user_id}: {e}")
+        # Если ошибка – считаем, что пользователь не подписан (безопаснее)
+        # Чтобы бот работал без прав админа, замените return False на return True
+        return False
 
 async def require_subscription(message: types.Message):
     keyboard = InlineKeyboardMarkup(
@@ -331,7 +326,7 @@ async def try_match(user_id: int):
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
-    # Проверка подписки
+    # Проверка подписки – если не подписан, показываем сообщение
     if not await is_subscribed(user_id):
         await require_subscription(message)
         return
