@@ -19,7 +19,7 @@ if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_TOKEN в переменных окружения!")
 
 ADMIN_ID = 6499184401
-CHANNEL_USERNAME = "@anonrolka"   # без @, имя канала
+CHANNEL_USERNAME = "anonrolka"   # без @, имя канала
 
 logging.basicConfig(level=logging.INFO)
 
@@ -127,15 +127,21 @@ def is_user_muted(user_id: int) -> bool:
         return False
     return False
 
-# ========== ПРОВЕРКА ПОДПИСКИ (исправлено) ==========
+# ========== ПРОВЕРКА ПОДПИСКИ (с обработкой ошибок) ==========
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         return member.status in ("member", "administrator", "creator")
     except Exception as e:
-        logging.error(f"Ошибка проверки подписки для {user_id}: {e}")
-        # Если бот не админ или другая ошибка – не пропускаем
-        return False
+        # Если ошибка "chat not found" – значит бот не добавлен в канал или канал не существует.
+        # В этом случае временно пропускаем проверку, чтобы бот работал,
+        # но в логах оставляем предупреждение.
+        if "chat not found" in str(e):
+            logging.warning(f"Канал {CHANNEL_USERNAME} не найден или бот не добавлен. Проверка подписки пропущена для {user_id}.")
+            return True  # Временно пропускаем проверку
+        else:
+            logging.error(f"Ошибка проверки подписки для {user_id}: {e}")
+            return False
 
 async def require_subscription(message: types.Message):
     keyboard = InlineKeyboardMarkup(
@@ -1064,7 +1070,7 @@ async def show_profile_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "check_subscription")
-async def check_subscription_callback(callback: types.CallbackQuery):
+async def check_subscription_callback(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     if await is_subscribed(user_id):
         await callback.message.edit_text("✅ Подписка подтверждена! Теперь вы можете пользоваться ботом.")
