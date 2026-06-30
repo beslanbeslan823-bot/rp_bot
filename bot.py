@@ -19,7 +19,7 @@ if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_TOKEN в переменных окружения!")
 
 ADMIN_ID = 6499184401
-CHANNEL_USERNAME = "lalalalalakks"   # без @, имя канала
+CHANNEL_USERNAME = "-1003519240075"   # без @, имя канала
 
 logging.basicConfig(level=logging.INFO)
 
