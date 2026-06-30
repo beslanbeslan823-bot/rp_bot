@@ -19,7 +19,6 @@ if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_TOKEN в переменных окружения!")
 
 ADMIN_ID = 6499184401
-# Используем ID канала (для приватных каналов)
 CHANNEL_USERNAME = "-1001704358190"   # ID канала @anonrolka
 
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +33,7 @@ DB_PATH = "bot_database.db"
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # Таблица пользователей
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -52,6 +52,17 @@ def init_db():
             mute_until INTEGER DEFAULT 0,
             is_banned INTEGER DEFAULT 0
         )
+    """)
+    # Таблица настроек
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    # Устанавливаем проверку подписки по умолчанию (1 = включена)
+    cur.execute("""
+        INSERT OR IGNORE INTO settings (key, value) VALUES ('subscription_check_enabled', '1')
     """)
     conn.commit()
     conn.close()
@@ -128,21 +139,42 @@ def is_user_muted(user_id: int) -> bool:
         return False
     return False
 
-# ========== ПРОВЕРКА ПОДПИСКИ С ДИАГНОСТИКОЙ ==========
+# ========== НАСТРОЙКИ (подписка) ==========
+def get_setting(key: str, default=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return row[0]
+    return default
+
+def set_setting(key: str, value: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+def is_subscription_check_enabled() -> bool:
+    val = get_setting("subscription_check_enabled", "1")
+    return val == "1"
+
+# ========== ПРОВЕРКА ПОДПИСКИ (с учётом настройки) ==========
 async def is_subscribed(user_id: int) -> bool:
+    # Если проверка выключена – всегда возвращаем True
+    if not is_subscription_check_enabled():
+        return True
     try:
-        # Попробуем получить информацию о канале по ID
         chat = await bot.get_chat(CHANNEL_USERNAME)
         logging.info(f"Канал найден: {chat.title} (ID: {chat.id})")
-        
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         status = member.status
         logging.info(f"Статус пользователя {user_id} в канале: {status}")
         return status in ("member", "administrator", "creator")
     except Exception as e:
         logging.error(f"Ошибка проверки подписки для {user_id}: {e}")
-        if "chat not found" in str(e):
-            logging.error("Проверьте ID канала – возможно, он неверный или бот не администратор.")
         return False
 
 async def require_subscription(message: types.Message):
@@ -845,7 +877,7 @@ async def cmd_report(message: types.Message):
     await bot.send_message(ADMIN_ID, f"⚠️ Жалоба от {user_id} на {partner_id}\nТекст: {message.text or 'без текста'}")
     await message.answer("📩 Ваша жалоба отправлена администратору.")
 
-# ========== АДМИН-КОМАНДЫ ==========
+# ========== АДМИН-КОМАНДЫ (включая переключение проверки) ==========
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -862,12 +894,17 @@ async def admin_panel(message: types.Message):
     cur.execute("SELECT user_id, partner_id FROM users WHERE is_chatting=1")
     active_chats = cur.fetchall()
     conn.close()
+    # Текущее состояние проверки подписки
+    check_enabled = is_subscription_check_enabled()
+    check_status = "✅ Включена" if check_enabled else "❌ Отключена"
     text = f"""
 📊 *Админ-панель*
 ━━━━━━━━━━━━━━━
 👥 Всего пользователей: {total_users}
 🔍 В поиске: {searching}
 💬 В чатах: {chatting}
+
+🔒 *Проверка подписки:* {check_status}
 
 *Активные чаты:*
 """
@@ -878,131 +915,26 @@ async def admin_panel(message: types.Message):
         text += "❌ Нет активных чатов."
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message(Command("warn"))
-async def cmd_warn(message: types.Message):
+@dp.message(Command("toggle_subscription"))
+async def cmd_toggle_subscription(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Недостаточно прав.")
         return
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("Использование: /warn <user_id>")
-        return
-    try:
-        target_id = int(args[1])
-    except ValueError:
-        await message.answer("ID должен быть числом.")
-        return
-    user = get_user(target_id)
-    if not user:
-        await message.answer("Пользователь не найден.")
-        return
-    new_warn = user["warn_count"] + 1
-    update_user(target_id, warn_count=new_warn)
-    if new_warn >= 3:
-        update_user(target_id, is_banned=1)
-        await bot.send_message(target_id, "⛔ Вы получили 3 предупреждения и были забанены.")
-        await message.answer(f"✅ Пользователь {target_id} получил бан (3 предупреждения).")
-    else:
-        await bot.send_message(target_id, f"⚠️ Вы получили предупреждение ({new_warn}/3).")
-        await message.answer(f"✅ Пользователю {target_id} выдано предупреждение ({new_warn}/3).")
+    current = is_subscription_check_enabled()
+    new_value = "0" if current else "1"
+    set_setting("subscription_check_enabled", new_value)
+    status = "включена 🔒" if new_value == "1" else "отключена 🔓"
+    await message.answer(f"✅ Проверка подписки *{status}*.", parse_mode="Markdown")
+    logging.info(f"Администратор {message.from_user.id} изменил проверку подписки на {new_value}")
 
-@dp.message(Command("mute"))
-async def cmd_mute(message: types.Message):
+@dp.message(Command("subscription_status"))
+async def cmd_subscription_status(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Недостаточно прав.")
         return
-    args = message.text.split()
-    if len(args) < 3:
-        await message.answer("Использование: /mute <user_id> <minutes>")
-        return
-    try:
-        target_id = int(args[1])
-        minutes = int(args[2])
-    except ValueError:
-        await message.answer("ID и минуты должны быть числами.")
-        return
-    user = get_user(target_id)
-    if not user:
-        await message.answer("Пользователь не найден.")
-        return
-    mute_until = int(time.time()) + minutes * 60
-    update_user(target_id, is_muted=1, mute_until=mute_until)
-    await bot.send_message(target_id, f"🔇 Вы были замьючены на {minutes} минут(ы).")
-    await message.answer(f"✅ Пользователь {target_id} замьючен на {minutes} минут(ы).")
-
-@dp.message(Command("unmute"))
-async def cmd_unmute(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Недостаточно прав.")
-        return
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("Использование: /unmute <user_id>")
-        return
-    try:
-        target_id = int(args[1])
-    except ValueError:
-        await message.answer("ID должен быть числом.")
-        return
-    user = get_user(target_id)
-    if not user:
-        await message.answer("Пользователь не найден.")
-        return
-    update_user(target_id, is_muted=0, mute_until=0)
-    await bot.send_message(target_id, "🔊 Ваш мьют снят.")
-    await message.answer(f"✅ Пользователь {target_id} размьючен.")
-
-@dp.message(Command("ban"))
-async def cmd_ban(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Недостаточно прав.")
-        return
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("Использование: /ban <user_id>")
-        return
-    try:
-        target_id = int(args[1])
-    except ValueError:
-        await message.answer("ID должен быть числом.")
-        return
-    user = get_user(target_id)
-    if not user:
-        await message.answer("Пользователь не найден.")
-        return
-    update_user(target_id, is_banned=1)
-    if user["is_chatting"]:
-        partner_id = user["partner_id"]
-        update_user(partner_id, is_chatting=0, partner_id=None)
-        update_user(target_id, is_chatting=0, partner_id=None)
-        await bot.send_message(partner_id, "⛔ Собеседник был забанен администратором. Чат завершён.")
-    if user["is_searching"] and target_id in search_queue:
-        search_queue.remove(target_id)
-        update_user(target_id, is_searching=0)
-    await bot.send_message(target_id, "⛔ Вы были забанены администратором.")
-    await message.answer(f"✅ Пользователь {target_id} забанен.")
-
-@dp.message(Command("unban"))
-async def cmd_unban(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Недостаточно прав.")
-        return
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("Использование: /unban <user_id>")
-        return
-    try:
-        target_id = int(args[1])
-    except ValueError:
-        await message.answer("ID должен быть числом.")
-        return
-    user = get_user(target_id)
-    if not user:
-        await message.answer("Пользователь не найден.")
-        return
-    update_user(target_id, is_banned=0)
-    await bot.send_message(target_id, "✅ Ваш бан снят.")
-    await message.answer(f"✅ Пользователь {target_id} разбанен.")
+    enabled = is_subscription_check_enabled()
+    status = "✅ Включена" if enabled else "❌ Отключена"
+    await message.answer(f"🔒 *Состояние проверки подписки:* {status}", parse_mode="Markdown")
 
 # ========== КНОПКИ МЕНЮ ==========
 @dp.callback_query(lambda c: c.data == "start_search")
@@ -1074,12 +1006,22 @@ async def show_profile_callback(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "check_subscription")
 async def check_subscription_callback(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    if await is_subscribed(user_id):
-        await callback.message.edit_text("✅ Подписка подтверждена! Теперь вы можете пользоваться ботом.")
-        # Проверяем, есть ли анкета
+    # Если проверка отключена – сразу пропускаем
+    if not is_subscription_check_enabled():
+        await callback.message.edit_text("✅ Проверка подписки отключена администратором. Добро пожаловать!")
         user = get_user(user_id)
         if not user:
-            # Начинаем заполнение анкеты
+            await state.set_state(ProfileForm.role)
+            await state.update_data(step=1, roles=[], types=[], genres=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
+            await show_role_step(callback.message, state, edit=True)
+        else:
+            await show_main_menu(callback.message)
+        await callback.answer()
+        return
+    if await is_subscribed(user_id):
+        await callback.message.edit_text("✅ Подписка подтверждена! Теперь вы можете пользоваться ботом.")
+        user = get_user(user_id)
+        if not user:
             await state.set_state(ProfileForm.role)
             await state.update_data(step=1, roles=[], types=[], genres=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
             await show_role_step(callback.message, state, edit=True)
@@ -1129,6 +1071,9 @@ async def set_commands():
         BotCommand(command="stop", description="⏹ Завершить чат или поиск"),
         BotCommand(command="next", description="⏭ Пропустить собеседника"),
         BotCommand(command="report", description="⚠️ Пожаловаться"),
+        BotCommand(command="admin", description="📊 Админ-панель"),
+        BotCommand(command="toggle_subscription", description="🔀 Вкл/Выкл проверку подписки"),
+        BotCommand(command="subscription_status", description="🔒 Статус проверки подписки"),
     ]
     await bot.set_my_commands(commands)
 
