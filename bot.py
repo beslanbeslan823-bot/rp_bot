@@ -19,7 +19,7 @@ if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_TOKEN в переменных окружения!")
 
 ADMIN_ID = 6499184401
-CHANNEL_USERNAME = "@anonrolka"  # канал для подписки
+CHANNEL_USERNAME = "anonrolka"   # без @, имя канала
 
 logging.basicConfig(level=logging.INFO)
 
@@ -127,14 +127,15 @@ def is_user_muted(user_id: int) -> bool:
         return False
     return False
 
-# ========== ПРОВЕРКА ПОДПИСКИ ==========
+# ========== ПРОВЕРКА ПОДПИСКИ (исправлено) ==========
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         return member.status in ("member", "administrator", "creator")
     except Exception as e:
-        logging.warning(f"Ошибка проверки подписки для {user_id}: {e}")
-        return False  # Теперь возвращаем False при ошибке
+        logging.error(f"Ошибка проверки подписки для {user_id}: {e}")
+        # Если бот не админ или другая ошибка – не пропускаем
+        return False
 
 async def require_subscription(message: types.Message):
     keyboard = InlineKeyboardMarkup(
@@ -1070,6 +1071,7 @@ async def check_subscription_callback(callback: types.CallbackQuery):
         # Проверяем, есть ли анкета
         user = get_user(user_id)
         if not user:
+            # Начинаем заполнение анкеты
             await state.set_state(ProfileForm.role)
             await state.update_data(step=1, roles=[], types=[], genres=[], age=None, preferred_age=[], gender=None, preferred_gender=[])
             await show_role_step(callback.message, state, edit=True)
