@@ -19,7 +19,8 @@ if not BOT_TOKEN:
     raise ValueError("Не задан TELEGRAM_TOKEN в переменных окружения!")
 
 ADMIN_ID = 6499184401
-CHANNEL_USERNAME = "-1001704358190"   # без @, имя канала
+# Используем ID канала (для приватных каналов)
+CHANNEL_USERNAME = "-1001704358190"   # ID канала @anonrolka
 
 logging.basicConfig(level=logging.INFO)
 
@@ -127,27 +128,34 @@ def is_user_muted(user_id: int) -> bool:
         return False
     return False
 
-# ========== ПРОВЕРКА ПОДПИСКИ (без фоллбэка) ==========
+# ========== ПРОВЕРКА ПОДПИСКИ С ДИАГНОСТИКОЙ ==========
 async def is_subscribed(user_id: int) -> bool:
     try:
+        # Попробуем получить информацию о канале по ID
+        chat = await bot.get_chat(CHANNEL_USERNAME)
+        logging.info(f"Канал найден: {chat.title} (ID: {chat.id})")
+        
         member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        return member.status in ("member", "administrator", "creator")
+        status = member.status
+        logging.info(f"Статус пользователя {user_id} в канале: {status}")
+        return status in ("member", "administrator", "creator")
     except Exception as e:
         logging.error(f"Ошибка проверки подписки для {user_id}: {e}")
-        # Если ошибка – считаем, что пользователь не подписан (безопаснее)
+        if "chat not found" in str(e):
+            logging.error("Проверьте ID канала – возможно, он неверный или бот не администратор.")
         return False
 
 async def require_subscription(message: types.Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Подписаться на канал", url="https://t.me/lalalalalakks")],
+            [InlineKeyboardButton(text="📢 Подписаться на канал", url="https://t.me/anonrolka")],
             [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_subscription")]
         ]
     )
     await message.answer(
         "🔒 *Для использования бота необходимо подписаться на наш канал!*\n\n"
         "📌 Нажмите кнопку ниже, чтобы подписаться:\n"
-        "👉 t.me/lalalalalakks\n\n"
+        "👉 t.me/anonrolka\n\n"
         "После подписки нажмите *«Проверить подписку»* ✅",
         reply_markup=keyboard,
         parse_mode="Markdown",
@@ -243,7 +251,7 @@ def get_main_menu_kb():
     builder.add(InlineKeyboardButton(text="👤 Моя анкета", callback_data="show_profile"))
     builder.row(
         InlineKeyboardButton(text="❓ Помощь", callback_data="show_help"),
-        InlineKeyboardButton(text="📢 Канал", url="https://t.me/lalalalalakks")
+        InlineKeyboardButton(text="📢 Канал", url="https://t.me/anonrolka")
     )
     return builder.as_markup()
 
