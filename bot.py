@@ -135,20 +135,19 @@ async def is_subscribed(user_id: int) -> bool:
     except Exception as e:
         logging.error(f"Ошибка проверки подписки для {user_id}: {e}")
         # Если ошибка – считаем, что пользователь не подписан (безопаснее)
-        # Чтобы бот работал без прав админа, замените return False на return True
         return False
 
 async def require_subscription(message: types.Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Подписаться на канал", url="https://t.me/anonrolka")],
+            [InlineKeyboardButton(text="📢 Подписаться на канал", url="https://t.me/lalalalalakks")],
             [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_subscription")]
         ]
     )
     await message.answer(
         "🔒 *Для использования бота необходимо подписаться на наш канал!*\n\n"
         "📌 Нажмите кнопку ниже, чтобы подписаться:\n"
-        "👉 t.me/anonrolka\n\n"
+        "👉 t.me/lalalalalakks\n\n"
         "После подписки нажмите *«Проверить подписку»* ✅",
         reply_markup=keyboard,
         parse_mode="Markdown",
@@ -244,7 +243,7 @@ def get_main_menu_kb():
     builder.add(InlineKeyboardButton(text="👤 Моя анкета", callback_data="show_profile"))
     builder.row(
         InlineKeyboardButton(text="❓ Помощь", callback_data="show_help"),
-        InlineKeyboardButton(text="📢 Канал", url="https://t.me/anonrolka")
+        InlineKeyboardButton(text="📢 Канал", url="https://t.me/lalalalalakks")
     )
     return builder.as_markup()
 
